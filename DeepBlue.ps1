@@ -25,7 +25,7 @@ https://github.com/sans-blue-team/DeepBlueCLI
 
 #>
 
-# DeepBlueCLI 1.9 pre-DerbyCon
+# DeepBlueCLI 2.01
 # Eric Conrad, Backshore Communications, LLC
 # deepblue <at> backshore <dot> net
 # Twitter: @eric_conrad
@@ -45,12 +45,27 @@ function Main {
     $logname=Check-Options $file $log
     #"Processing the " + $logname + " log..."
     $filter=Create-Filter $file $logname
+    # Passworg guessing/spraying variables:
     $maxfailedlogons=25 # Alert after this many failed logons
-    $failedlogins=@{}   # HashTable of failed logins per user
+    $failedlogons=@{}   # HashTable of failed logons per user
+    $totalfailedlogons=0 # Total number of failed logons (for all accounts)
+    $totalfailedaccounts=0 # Total number of accounts with a failed logon
+    # Track total Sensitive Privilege Use occurrences
+    $totalsensprivuse=0
+    $maxtotalsensprivuse=4
+    # Admin logon variables:
+    $totaladminlogons=0  # Total number of logons with SeDebugPrivilege
+    $maxadminlogons=10   # Alert after this many admin logons
+    $adminlogons=@{}     # HashTable of admin logons
+    $multipleadminlogons=@{} #Hashtable to track multiple admin logons per account
+    $alert_all_admin=0   # Set to 1 to alert every admin logon (set to 0 disable this)
     # Obfuscation variables:
     $minpercent=.65  # minimum percentage of alphanumeric and common symbols
     $maxbinary=.50   # Maximum percentage of zeros and ones to detect binary encoding
-    #
+    # Password spray variables:
+    $passspraytrack = @{}
+    $passsprayuniqusermax = 6
+    $passsprayloginmax = 6
     # Sysmon variables:
     # Check for unsigned EXEs/DLLs. This can be very chatty, so it's disabled. 
     # Set $checkunsigned to 1 to enable:
@@ -88,6 +103,81 @@ function Main {
                     Check-Command
                 }
             }
+            ElseIf ($event.id -eq 4672){ 
+                # Special privileges assigned to new logon (possible admin access)
+                $username=$eventXML.Event.EventData.Data[1]."#text"
+                $domain=$eventXML.Event.EventData.Data[2]."#text"
+                $securityid=$eventXML.Event.EventData.Data[3]."#text"
+                $privileges=$eventXML.Event.EventData.Data[4]."#text"
+                if ($privileges -Match "SeDebugPrivilege") { #Admin account with SeDebugPrivilege
+                    if ($alert_all_admin){ # Alert for every admin logon
+                        $obj.Message = "Logon with SeDebugPrivilege (admin access)" 
+                        $obj.Results = "Username: $username`n"
+                        $obj.Results += "Domain: $domain`n"
+                        $obj.Results += "User SID: $securityid`n"
+                        $obj.Results += "Privileges: $privileges"
+                        Write-Output $obj
+                    }
+                    # Track User SIDs used during admin logons (can track one account logging into multiple systems)
+                    $totaladminlogons+=1
+                    if($adminlogons.ContainsKey($username)){ 
+                        $string=$adminlogons.$username
+                        if (-Not ($string -Match $securityid)){ # One username with multiple admin logon SIDs 
+                            $multipleadminlogons.Set_Item($username,1)
+                            $string+=" $securityid"
+                            $adminlogons.Set_Item($username,$string)
+                        }
+                    }
+                    Else{
+                        $adminlogons.add($username,$securityid) 
+
+                        #$adminlogons.$username=$securityid
+                    }
+                    #$adminlogons.Set_Item($username,$securitysid)
+                    #$adminlogons($username)+=($securitysid)
+                }
+                # This unique privilege list is used by Mimikatz 2.2.0
+                # Disabling due to false-positive with MS Exchange.
+#                If ($privileges -Match "SeAssignPrimaryTokenPrivilege" `
+#                        -And $privileges -Match "SeTcbPrivilege" `
+#                        -And $privileges -Match "SeSecurityPrivilege" `
+#                        -And $privileges -Match "SeTakeOwnershipPrivilege" `
+#                        -And $privileges -Match "SeLoadDriverPrivilege" `
+#                        -And $privileges -Match "SeBackupPrivilege" `
+#                        -And $privileges -Match "SeRestorePrivilege" `
+#                        -And $privileges -Match "SeDebugPrivilege" `
+#                        -And $privileges -Match "SeAuditPrivilege" `
+#                        -And $privileges -Match "SeSystemEnvironmentPrivilege" `
+#                        -And $privileges -Match "SeImpersonatePrivilege" `
+#                        -And $privileges -Match "SeDelegateSessionUserImpersonatePrivilege") {
+#                    $obj.Message = "Mimikatz token::elevate Privilege Use" 
+#                    $obj.Results = "Username: $username`n"
+#                    $obj.Results += "Domain: $domain`n"
+#                    $obj.Results += "User SID: $securityid`n"
+#                    $pprivileges = $privileges -replace "`n",", " -replace "\s+"," "
+#                    $obj.Results += "Privileges: $pprivileges"
+#                    Write-Output($obj)
+#                }
+                # This unique privilege list is used by Metasploit exploit/windows/smb/psexec (v5.0.4 tested)
+#               # Disabling due to false-positive with MS Exchange Server
+#                If ($privileges -Match "SeSecurityPrivilege" `
+#                        -And $privileges -Match "SeBackupPrivilege" `
+#                        -And $privileges -Match "SeRestorePrivilege" `
+#                        -And $privileges -Match "SeTakeOwnershipPrivilege" `
+#                        -And $privileges -Match "SeDebugPrivilege" `
+#                        -And $privileges -Match "SeSystemEnvironmentPrivilege" `
+#                        -And $privileges -Match "SeLoadDriverPrivilege" `
+#                        -And $privileges -Match "SeImpersonatePrivilege" `
+#                        -And $privileges -Match "SeDelegateSessionUserImpersonatePrivilege") {
+#                    $obj.Message = "Metasploit psexec Privilege Use" 
+#                    $obj.Results = "Username: $username`n"
+#                    $obj.Results += "Domain: $domain`n"
+#                    $obj.Results += "User SID: $securityid`n"
+#                    $pprivileges = $privileges -replace "`n",", " -replace "\s+"," "
+#                    $obj.Results += "Privileges: $pprivileges"
+#                    Write-Output($obj)
+#                }
+            }
             ElseIf ($event.id -eq 4720){ 
                 # A user account was created.
                 $username=$eventXML.Event.EventData.Data[0]."#text"
@@ -97,8 +187,8 @@ function Main {
                 $obj.Results += "User SID: $securityid`n"
                 Write-Output $obj
             }
-            ElseIf(($event.id -eq 4728) -or ($event.id -eq 4732)){
-                # A member was added to a security-enabled (global|local) group.
+            ElseIf(($event.id -eq 4728) -or ($event.id -eq 4732) -or ($event.id -eq 4756)){
+                # A member was added to a security-enabled (global|local|universal) group.
                 $groupname=$eventXML.Event.EventData.Data[2]."#text"
                 # Check if group is Administrators, may later expand to all groups
                 if ($groupname -eq "Administrators"){    
@@ -107,6 +197,7 @@ function Main {
                     switch ($event.id){
                         4728 {$obj.Message = "User added to global $groupname group"}
                         4732 {$obj.Message = "User added to local $groupname group"}
+                        4756 {$obj.Message = "User added to universal $groupname group"}
                     }
                     $obj.Results = "Username: $username`n"
                     $obj.Results += "User SID: $securityid`n"
@@ -117,13 +208,72 @@ function Main {
                 # An account failed to log on.
                 # Requires auditing logon failures
                 # https://technet.microsoft.com/en-us/library/cc976395.aspx
+                $totalfailedlogons+=1
                 $username=$eventXML.Event.EventData.Data[5]."#text"
-                if($failedlogins.ContainsKey($username)){
-                    $count=$failedlogins.Get_Item($username)
-                    $failedlogins.Set_Item($username,$count+1)
+                if($failedlogons.ContainsKey($username)){
+                    $count=$failedlogons.Get_Item($username)
+                    $failedlogons.Set_Item($username,$count+1)
                 }
                 Else{
-                    $failedlogins.Set_Item($username,1)
+                    $failedlogons.Set_Item($username,1)
+                    $totalfailedaccounts+=1   
+                }
+            }
+            ElseIf($event.id -eq 4673){
+                # Sensitive Privilege Use (Mimikatz)
+                $totalsensprivuse+=1
+                # use -eq here to avoid multiple log notices
+                if ($totalsensprivuse -eq $maxtotalsensprivuse) {
+                    $obj.Message = "Sensititive Privilege Use Exceeds Threshold"
+                    $obj.Results = "Potentially indicative of Mimikatz, multiple sensitive privilege calls have been made.`n"
+
+                    $username=$eventXML.Event.EventData.Data[1]."#text"
+                    $domainname=$eventXML.Event.EventData.Data[2]."#text"
+
+                    $obj.Results += "Username: $username`n"
+                    $obj.Results += "Domain Name: $domainname`n"
+                    Write-Output $obj
+                }
+            }
+            ElseIf($event.id -eq 4648){
+                # A logon was attempted using explicit credentials.
+                $username=$eventXML.Event.EventData.Data[1]."#text"
+                $hostname=$eventXML.Event.EventData.Data[2]."#text"
+                $targetusername=$eventXML.Event.EventData.Data[5]."#text"
+                $sourceip=$eventXML.Event.EventData.Data[12]."#text"
+
+                # For each #4648 event, increment a counter in $passspraytrack. If that counter exceeds 
+                # $passsprayloginmax, then check for $passsprayuniqusermax also exceeding threshold and raise
+                # a notice.
+                if ($passspraytrack[$targetusername] -eq $null) {
+                    $passspraytrack[$targetusername] = 1
+                } else {
+                    $passspraytrack[$targetusername] += 1
+                }
+                if ($passspraytrack[$targetusername] -gt $passsprayloginmax) {
+                    # This user account has exceedd the threshoold for explicit logins. Identify the total number
+                    # of accounts that also have similar explicit login patterns.
+                    $passsprayuniquser=0
+                    foreach($key in $passspraytrack.keys) {
+                        if ($passspraytrack[$key] -gt $passsprayloginmax) { 
+                            $passsprayuniquser+=1
+                        }
+                    }
+                    if ($passsprayuniquser -gt $passsprayuniqusermax) {
+                        $usernames=""
+                        foreach($key in $passspraytrack.keys) {
+                            $usernames += $key
+                            $usernames += " "
+                        }
+                        $obj.Message = "Distributed Account Explicit Credential Use (Password Spray Attack)"
+                        $obj.Results = "The use of multiple user account access attempts with explicit credentials is "
+                        $obj.Results += "an indicator of a password spray attack.`n"
+                        $obj.Results += "Target Usernames: $usernames`n"
+                        $obj.Results += "Accessing Username: $username`n"
+                        $obj.Results += "Accessing Host Name: $hostname`n"
+                        Write-Output $obj
+                        $passspraytrack = @{} # Reset
+                    }
                 }
             }
         }
@@ -167,6 +317,23 @@ function Main {
                     $obj.Message = "Suspicious Service Name"
                     $obj.Results = "Service name: $servicename`n"
                     $obj.Results += $text
+                    Write-Output $obj
+                }
+            }
+            ElseIf ($event.id -eq 7040){
+                # The start type of the Windows Event Log service was changed from auto start to disabled.
+                $servicename=$eventXML.Event.EventData.Data[0]."#text"
+                $action = $eventXML.Event.EventData.Data[1]."#text"
+                if ($servicename -ccontains "Windows Event Log") {
+                    $obj.Results = "Service name: $servicename`n"
+                    $obj.Results += $text
+                    if ($action -eq "disabled") {
+                        $obj.Message = "Event Log Service Stopped"
+                        $obj.Results += "Selective event log manipulation may follow this event."
+                    } elseIf ($action -eq "auto start") {
+                        $obj.Message = "Event Log Service Started"
+                        $obj.Results += "Selective event log manipulation may precede this event."
+                    }
                     Write-Output $obj
                 }
             }
@@ -300,15 +467,32 @@ function Main {
              }
         }
     }
-    # Iterate through failed logins hashtable (key is $username)
-    foreach ($username in $failedlogins.Keys) {
-        $count=$failedlogins.Get_Item($username)
-        if ($count -gt $maxfailedlogons){
-            $obj.Message="High number of failed logons"
+    # Iterate through admin logons hashtable (key is $username)
+    foreach ($username in $adminlogons.Keys) {
+        $securityid=$adminlogons.Get_Item($username)
+        if($multipleadminlogons.$username){
+            $obj.Message="Multiple admin logons for one account"
             $obj.Results= "Username: $username`n"
-            $obj.Results += "$count failed logons"
+            $obj.Results += "User SID Access Count: " + $securityid.split().Count
             Write-Output $obj
         }
+    }
+    # Iterate through failed logons hashtable (key is $username)
+    foreach ($username in $failedlogons.Keys) {
+        $count=$failedlogons.Get_Item($username)
+        if ($count -gt $maxfailedlogons){
+            $obj.Message="High number of logon failures for one account"
+            $obj.Results= "Username: $username`n"
+            $obj.Results += "Total logon failures: $count"
+            Write-Output $obj
+        }
+    }
+    # Password spraying:
+    if (($totalfailedlogons -gt $maxfailedlogons) -and ($totalfailedaccounts -gt 1)) {
+        $obj.Message="High number of total logon failures for multiple accounts"
+        $obj.Results= "Total accounts: $totalfailedaccounts`n"
+        $obj.Results+= "Total logon failures: $totalfailedlogons`n"
+        Write-Output $obj
     }
 } 
 
@@ -375,8 +559,8 @@ function Create-Filter($file, $logname)
 {
     # Return the Get-Winevent filter 
     #
-    $sys_events="7030,7036,7045"
-    $sec_events="4688,4720,4728,4732,4625"
+    $sys_events="7030,7036,7045,7040"
+    $sec_events="4688,4672,4720,4728,4732,4756,4625,4673,4648"
     $app_events="2"
     $applocker_events="8003,8004,8006,8007"
     $powershell_events="4103,4104"
